@@ -1,0 +1,175 @@
+require('dotenv').config();
+const {
+  Client,
+  GatewayIntentBits,
+  SlashCommandBuilder,
+  EmbedBuilder,
+  Routes,
+  REST
+} = require('discord.js');
+const fs = require('fs');
+
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds]
+});
+
+// ========== 資料儲存 ==========
+const DATA_FILE = './checkin-data.json';
+
+function loadData() {
+  if (!fs.existsSync(DATA_FILE)) {
+    fs.writeFileSync(DATA_FILE, JSON.stringify({}));
+  }
+  return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+}
+
+function saveData(data) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+}
+
+// ========== 註冊指令 ==========
+const commands = [
+  new SlashCommandBuilder()
+    .setName('簽到')
+    .setDescription('進行每日簽到'),
+  new SlashCommandBuilder()
+    .setName('簽到資訊')
+    .setDescription('查看自己的簽到紀錄'),
+  new SlashCommandBuilder()
+    .setName('簽到排行')
+    .setDescription('查看連續簽到排行榜')
+].map(cmd => cmd.toJSON());
+
+const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+
+(async () => {
+  try {
+    console.log('正在註冊指令...');
+    await rest.put(
+      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+      { body: commands }
+    );
+    console.log('指令註冊完成！');
+  } catch (error) {
+    console.error(error);
+  }
+})();
+
+// ========== 機器人上線 ==========
+client.once('ready', () => {
+  console.log(`已登入為 ${client.user.tag}`);
+});
+
+// ========== 處理指令 ==========
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const data = loadData();
+  const userId = interaction.user.id;
+  const today = new Date().toLocaleDateString('zh-HK'); // 使用香港日期格式
+
+  // ========== /簽到 ==========
+  if (interaction.commandName === '簽到') {
+    if (!data[userId]) {
+      data[userId] = {
+        points: 0,
+        streak: 0,
+        lastCheckin: null,
+        totalCheckins: 0
+      };
+    }
+
+    const user = data[userId];
+
+    // 檢查今天是否已經簽到
+    if (user.lastCheckin === today) {
+      return interaction.reply({
+        content: '我今天跟你見過面了，明天再來看來我吧',
+        ephemeral: true
+      });
+    }
+
+    // 計算連續天數
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toLocaleDateString('zh-HK');
+
+    if (user.lastCheckin === yesterdayStr) {
+      user.streak += 1;
+    } else {
+      user.streak = 1; // 中斷了就重新計算
+    }
+
+
+    user.lastCheckin = today;
+    user.totalCheckins += 1;
+
+    saveData(data);
+
+    const embed = new EmbedBuilder()
+      .setTitle('✅ 簽到成功！')
+      .setColor(0x57F287)
+      .setDescription(` ${interaction.user} 已來報到`)
+      .addFields(
+        { name: '連續簽到', value: `${user.streak} 天`, inline: true },
+        { name: '累計簽到', value: `${user.totalCheckins} 次`, inline: true }
+      )
+      .setTimestamp()
+      .setFooter({ text: '記得明天再來' });
+
+    await interaction.reply({ embeds: [embed] });
+  }
+
+  // ========== /簽到資訊 ==========
+  if (interaction.commandName === '簽到資訊') {
+    if (!data[userId]) {
+      return interaction.reply({
+        content: '你還沒有簽到紀錄，先使用 `/簽到` 簽到喔',
+        ephemeral: true
+      });
+    }
+
+    const user = data[userId];
+
+    const embed = new EmbedBuilder()
+      .setTitle(`${interaction.user.username} 的簽到資訊`)
+      .setColor(0x5865F2)
+      .addFields(
+        { name: '累計簽到', value: `${user.totalCheckins} 次`, inline: true },
+        { name: '上次簽到', value: user.lastCheckin || '無', inline: true }
+      )
+      .setThumbnail(interaction.user.displayAvatarURL())
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+  }
+
+  // ========== /簽到排行 ==========
+  if (interaction.commandName === '簽到排行') {
+    const sorted = Object.entries(data)
+      .sort((a, b) => b[1].streak - a[1].streak)
+      .slice(0, 10);
+
+    if (sorted.length === 0) {
+      return interaction.reply('目前還沒有任何簽到紀錄。');
+    }
+
+    let description = '';
+    for (let i = 0; i < sorted.length; i++) {
+      const [id, info] = sorted[i];
+      const member = await interaction.guild.members.fetch(id).catch(() => null);
+      const name = member ? member.displayName : `未知用戶 (${id})`;
+      description += `**${i + 1}.** ${name} — 連續 **${info.streak}** 天（${info.points} 分）\n`;
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle('🏆 連續簽到排行榜')
+      .setColor(0xFEE75C)
+      .setDescription(description)
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [embed] });
+  }
+});
+
+client.login(process.env.TOKEN);
