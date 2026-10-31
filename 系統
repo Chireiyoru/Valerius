@@ -184,7 +184,12 @@ let lastError = null;        // 最近一次錯誤（登入或註冊）
 let commandError = null;     // 指令註冊錯誤
 let registeredCommands = []; // 已註冊成功的指令
 
-async function registerCommands() {
+// 剛被邀請加入伺服器時，Discord 有時會暫時回傳 Missing Access，
+// 因此註冊失敗會自動重試。
+const COMMAND_RETRY_MS = 15 * 1000;
+const COMMAND_MAX_ATTEMPTS = 5;
+
+async function registerCommands(attempt = 1) {
   try {
     console.log('正在註冊指令...');
     registeredCommands = await rest.put(
@@ -192,11 +197,17 @@ async function registerCommands() {
       { body: commands }
     );
     commandError = null;
+    if (lastError && lastError.includes('指令註冊失敗')) lastError = null;
     console.log(`指令註冊完成！共 ${registeredCommands.length} 個。`);
   } catch (error) {
     commandError = `${error.message}${error.code ? `（code ${error.code}）` : ''}`;
     lastError = `指令註冊失敗：${commandError}`;
-    console.error('指令註冊失敗：', commandError);
+    if (attempt >= COMMAND_MAX_ATTEMPTS) {
+      console.error('指令註冊失敗，停止重試：', commandError);
+      return;
+    }
+    console.error(`指令註冊失敗（第 ${attempt} 次）：${commandError}，${COMMAND_RETRY_MS / 1000} 秒後重試`);
+    setTimeout(() => registerCommands(attempt + 1), COMMAND_RETRY_MS);
   }
 }
 
