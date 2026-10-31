@@ -13,6 +13,8 @@ services:
       - STATUS_PORT=3000
       - FAQ_FILE=/data/faq-data.json
       - CONFIG_FILE=/data/faq-config.json
+    # 憑證只從 app secrets 讀取（TOKEN、CLIENT_ID、GUILD_ID），
+    # 不放在 environment: 裡，儀表板更新的值才會生效。
     env_file:
       - /run/base44/app.env
     volumes:
