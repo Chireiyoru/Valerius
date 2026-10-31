@@ -10,6 +10,7 @@ const {
   ChannelType
 } = require('discord.js');
 const fs = require('fs');
+const startStatusServer = require('./status-server');
 
 const client = new Client({
   intents: [
@@ -20,8 +21,9 @@ const client = new Client({
 });
 
 // ========== 設定 ==========
-const FAQ_FILE = './faq-data.json';
-const CONFIG_FILE = './faq-config.json';
+// 資料檔路徑可用環境變數覆寫（例如容器內掛載的資料目錄）
+const FAQ_FILE = process.env.FAQ_FILE || './faq-data.json';
+const CONFIG_FILE = process.env.CONFIG_FILE || './faq-config.json';
 
 // 預設設定
 const DEFAULT_CONFIG = {
@@ -173,20 +175,30 @@ const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 ].map(cmd => cmd.toJSON());
 
-const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+const rest = new REST({ version: '10' });
+if (process.env.TOKEN) rest.setToken(process.env.TOKEN);
 
-(async () => {
+// ========== 執行時狀態（供狀態頁面顯示）==========
+const startedAt = Date.now();
+let lastError = null;        // 最近一次錯誤（登入或註冊）
+let commandError = null;     // 指令註冊錯誤
+let registeredCommands = []; // 已註冊成功的指令
+
+async function registerCommands() {
   try {
     console.log('正在註冊指令...');
-    await rest.put(
+    registeredCommands = await rest.put(
       Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
       { body: commands }
     );
-    console.log('指令註冊完成！');
+    commandError = null;
+    console.log(`指令註冊完成！共 ${registeredCommands.length} 個。`);
   } catch (error) {
-    console.error(error);
+    commandError = `${error.message}${error.code ? `（code ${error.code}）` : ''}`;
+    lastError = `指令註冊失敗：${commandError}`;
+    console.error('指令註冊失敗：', commandError);
   }
-})();
+}
 
 // ========== 自動完成 ==========
 client.on('interactionCreate', async interaction => {
@@ -204,8 +216,13 @@ client.on('interactionCreate', async interaction => {
 });
 
 // ========== 機器人上線 ==========
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log(`已登入為 ${client.user.tag}`);
+  console.log(`所在伺服器：${client.guilds.cache.size} 個`);
+  if (client.guilds.cache.size === 0) {
+    console.warn('機器人尚未加入任何伺服器，邀請它加入後才會收到訊息。');
+  }
+  await registerCommands();
 });
 
 // ========== 監聽訊息：自動回覆 + 記錄管理員發言 ==========
@@ -456,4 +473,70 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-client.login(process.env.TOKEN);
+// 登入失敗（例如後台還沒開啟 Message Content Intent）時每 60 秒重試，
+// 讓使用者開啟權限後機器人不需要重啟就能自動上線。
+const LOGIN_RETRY_MS = 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 10;
+
+async function loginWithRetry(attempt = 1) {
+  try {
+    await client.login(process.env.TOKEN);
+  } catch (error) {
+    if (attempt >= LOGIN_MAX_ATTEMPTS) {
+      lastError = `登入失敗：${error.message}（已重試 ${attempt} 次，請檢查 TOKEN 與 Discord Developer Portal 設定）`;
+      console.error('登入失敗，停止重試：', error.message);
+      return;
+    }
+    lastError = `登入失敗：${error.message}（第 ${attempt} 次，60 秒後重試）`;
+    console.error(`登入失敗（第 ${attempt} 次）：${error.message}，${LOGIN_RETRY_MS / 1000} 秒後重試`);
+    setTimeout(() => loginWithRetry(attempt + 1), LOGIN_RETRY_MS);
+  }
+}
+
+// ========== 狀態頁面資料 ==========
+function getStatus() {
+  let faq = [];
+  let cfg = DEFAULT_CONFIG;
+  try { faq = loadFaq(); } catch { /* 讀取失敗時顯示空題庫 */ }
+  try { cfg = loadConfig(); } catch { /* 讀取失敗時顯示預設設定 */ }
+
+  const seconds = Math.floor((Date.now() - startedAt) / 1000);
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+
+  return {
+    ready: client.isReady(),
+    botTag: client.user ? client.user.tag : null,
+    clientId: process.env.CLIENT_ID || null,
+    guilds: client.guilds.cache.size,
+    configuredGuildId: process.env.GUILD_ID || null,
+    commandCount: registeredCommands.length,
+    commandError,
+    lastError,
+    faqCount: faq.length,
+    enabledRules: faq.filter(r => r.enabled).length,
+    config: cfg,
+    uptime: h > 0 ? `${h} 小時 ${m} 分` : `${m} 分 ${seconds % 60} 秒`
+  };
+}
+
+// ========== 啟動 ==========
+if (require.main === module) {
+  const statusPort = Number(process.env.STATUS_PORT || 0);
+  if (statusPort) startStatusServer({ port: statusPort, getStatus });
+
+  // 指令會在機器人上線後（ready 事件）才註冊，需要它已經加入目標伺服器。
+  loginWithRetry();
+}
+
+module.exports = {
+  DEFAULT_CONFIG,
+  commands,
+  normalize,
+  matchScore,
+  findBestMatch,
+  loadFaq,
+  saveFaq,
+  loadConfig,
+  saveConfig
+};

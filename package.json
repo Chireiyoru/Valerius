@@ -1,0 +1,18 @@
+{
+  "name": "valerius-faq-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Discord FAQ auto-reply bot with slash command management",
+  "main": "系統",
+  "scripts": {
+    "start": "node 系統",
+    "test": "node test/faq.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5"
+  }
+}

@@ -1,0 +1,6 @@
+node_modules/
+faq-data.json
+faq-config.json
+.env
+.env.local
+data/

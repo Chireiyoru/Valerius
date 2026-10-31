@@ -1,0 +1,26 @@
+{
+  "previewPort": 3000,
+  "healthPath": "/health",
+  "startCommand": "docker compose -f docker-compose.base44.yml up -d",
+  "secrets": [
+    {
+      "name": "TOKEN",
+      "description": "Discord bot token (Developer Portal → Bot → Reset Token). Required at boot.",
+      "requiredAtBoot": true
+    },
+    {
+      "name": "CLIENT_ID",
+      "description": "Discord application (client) id, used for slash command registration and the invite URL.",
+      "requiredAtBoot": true
+    },
+    {
+      "name": "GUILD_ID",
+      "description": "Id of the Discord server the bot registers its slash commands in and operates in.",
+      "requiredAtBoot": true
+    }
+  ],
+  "notes": [
+    "Message Content Intent must be enabled in the Discord Developer Portal (Bot → Privileged Gateway Intents) or client.login() fails with 'Used disallowed intents'.",
+    "Runtime state (faq-data.json, faq-config.json) lives in the bot-data volume, not in the repo."
+  ]
+}
