@@ -175,7 +175,14 @@ const commands = [
 
 const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
 
+// 缺少憑證時只記錄狀態，不讓程式崩潰（可在狀態頁看到缺哪一個）
+const botState = { error: null, configured: Boolean(process.env.TOKEN) };
+
 (async () => {
+  if (!process.env.TOKEN || !process.env.CLIENT_ID || !process.env.GUILD_ID) {
+    console.warn('缺少 TOKEN / CLIENT_ID / GUILD_ID，已跳過指令註冊。');
+    return;
+  }
   try {
     console.log('正在註冊指令...');
     await rest.put(
@@ -184,6 +191,7 @@ const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
     );
     console.log('指令註冊完成！');
   } catch (error) {
+    botState.error = error.message;
     console.error(error);
   }
 })();
@@ -456,4 +464,19 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-client.login(process.env.TOKEN);
+client.on('error', err => {
+  botState.error = err.message;
+  console.error('客戶端錯誤：', err);
+});
+
+if (process.env.TOKEN) {
+  client.login(process.env.TOKEN).catch(err => {
+    botState.error = err.message;
+    console.error('登入失敗：', err.message);
+  });
+} else {
+  console.warn('未設定 TOKEN，機器人未登入。');
+}
+
+// 提供給狀態頁讀取執行時狀態
+module.exports = { client, botState, commands, loadFaq, loadConfig, isAutoPausedByAdmin };
