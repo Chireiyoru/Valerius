@@ -5,39 +5,172 @@ const {
   SlashCommandBuilder,
   EmbedBuilder,
   Routes,
-  REST
+  REST,
+  PermissionFlagsBits,
+  ChannelType
 } = require('discord.js');
 const fs = require('fs');
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent // 必要：讀取訊息內容
+  ]
 });
 
-// ========== 資料儲存 ==========
-const DATA_FILE = './checkin-data.json';
+// ========== 設定 ==========
+const FAQ_FILE = './faq-data.json';
+const CONFIG_FILE = './faq-config.json';
 
-function loadData() {
-  if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({}));
+// 預設設定
+const DEFAULT_CONFIG = {
+  enabled: true,            // 自動回覆總開關
+  channelIds: [],           // 只在這幾個頻道生效；空陣列 = 全群生效
+  cooldownSeconds: 60,      // 同一用戶同一題目的冷卻秒數
+  adminPauseMinutes: 0,     // 管理員發言後暫停自動回覆的分鐘數（0 = 不啟用）
+  replyWithEmbed: true,     // 用 Embed 回覆（false = 純文字）
+  minMatchScore: 1          // 至少命中幾個關鍵字才回覆
+};
+
+// 題庫格式：
+// [
+//   {
+//     id: 'rule_1',
+//     keywords: ['簽到', '每日'],
+//     answer: '請使用 /簽到 指令進行每日簽到。',
+//     enabled: true
+//   }
+// ]
+
+function loadJSON(file, fallback) {
+  if (!fs.existsSync(file)) {
+    fs.writeFileSync(file, JSON.stringify(fallback, null, 2));
+    return fallback;
   }
-  return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return fallback;
+  }
 }
 
-function saveData(data) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+function saveJSON(file, data) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2));
+}
+
+function loadFaq() {
+  return loadJSON(FAQ_FILE, []);
+}
+function saveFaq(faq) {
+  saveJSON(FAQ_FILE, faq);
+}
+
+function loadConfig() {
+  const cfg = loadJSON(CONFIG_FILE, DEFAULT_CONFIG);
+  return { ...DEFAULT_CONFIG, ...cfg };
+}
+function saveConfig(cfg) {
+  saveJSON(CONFIG_FILE, cfg);
+}
+
+// ========== 執行時狀態（不寫檔）==========
+const cooldownMap = new Map();   // key: `${userId}:${ruleId}` -> timestamp
+let lastAdminActivity = 0;       // 最近一次管理員發言時間（毫秒）
+
+function isAdmin(member) {
+  if (!member) return false;
+  return member.permissions.has(PermissionFlagsBits.ManageGuild) ||
+         member.permissions.has(PermissionFlagsBits.Administrator);
+}
+
+function isAutoPausedByAdmin() {
+  const cfg = loadConfig();
+  if (cfg.adminPauseMinutes <= 0) return false;
+  if (!lastAdminActivity) return false;
+  const diffMin = (Date.now() - lastAdminActivity) / 60000;
+  return diffMin < cfg.adminPauseMinutes;
+}
+
+// 將字串轉小寫並去除多餘空白，方便比對
+function normalize(text) {
+  return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+// 計算一條規則對訊息的匹配分數（命中幾個關鍵字）
+function matchScore(content, rule) {
+  const text = normalize(content);
+  let score = 0;
+  for (const kw of rule.keywords) {
+    const k = normalize(kw);
+    if (k && text.includes(k)) score++;
+  }
+  return score;
+}
+
+// 從題庫找出最佳匹配
+function findBestMatch(content, faq) {
+  let best = null;
+  let bestScore = 0;
+  for (const rule of faq) {
+    if (!rule.enabled) continue;
+    if (!Array.isArray(rule.keywords) || rule.keywords.length === 0) continue;
+    const score = matchScore(content, rule);
+    if (score > bestScore) {
+      bestScore = score;
+      best = rule;
+    }
+  }
+  return { rule: best, score: bestScore };
 }
 
 // ========== 註冊指令 ==========
 const commands = [
   new SlashCommandBuilder()
-    .setName('簽到')
-    .setDescription('進行每日簽到'),
+    .setName('問答新增')
+    .setDescription('【管理員】新增一條自動回覆規則')
+    .addStringOption(o => o.setName('關鍵字').setDescription('多個關鍵字用逗號分隔，例如：簽到,每日').setRequired(true))
+    .addStringOption(o => o.setName('回答').setDescription('機器人要回覆的內容').setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
   new SlashCommandBuilder()
-    .setName('簽到資訊')
-    .setDescription('查看自己的簽到紀錄'),
+    .setName('問答刪除')
+    .setDescription('【管理員】刪除一條自動回覆規則')
+    .addStringOption(o => o.setName('編號').setDescription('規則 ID').setRequired(true).setAutocomplete(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
   new SlashCommandBuilder()
-    .setName('簽到排行')
-    .setDescription('查看連續簽到排行榜')
+    .setName('問答列表')
+    .setDescription('【管理員】查看所有自動回覆規則')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('問答開關')
+    .setDescription('【管理員】啟用或停用某一條規則')
+    .addStringOption(o => o.setName('編號').setDescription('規則 ID').setRequired(true).setAutocomplete(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('問答測試')
+    .setDescription('【管理員】測試某句話會匹配到哪條規則')
+    .addStringOption(o => o.setName('內容').setDescription('要測試的句子').setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('問答設定')
+    .setDescription('【管理員】調整自動回覆系統設定')
+    .addBooleanOption(o => o.setName('啟用').setDescription('自動回覆總開關').setRequired(false))
+    .addIntegerOption(o => o.setName('冷卻秒數').setDescription('同一用戶同一題目冷卻秒數').setRequired(false).setMinValue(0))
+    .addIntegerOption(o => o.setName('管理員暫停分鐘').setDescription('管理員發言後暫停幾分鐘（0=不啟用）').setRequired(false).setMinValue(0))
+    .addChannelOption(o => o.setName('限定頻道').setDescription('只在這個頻道生效（留空=全群）').setRequired(false).addChannelTypes(ChannelType.GuildText))
+    .addBooleanOption(o => o.setName('清除限定頻道').setDescription('清除所有限定頻道，恢復全群生效').setRequired(false))
+    .addBooleanOption(o => o.setName('使用嵌入').setDescription('是否用 Embed 回覆').setRequired(false))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('問答狀態')
+    .setDescription('【管理員】查看自動回覆系統目前狀態')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 ].map(cmd => cmd.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
@@ -55,120 +188,271 @@ const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
   }
 })();
 
+// ========== 自動完成 ==========
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isAutocomplete()) return;
+  const faq = loadFaq();
+  const focused = interaction.options.getFocused().toLowerCase();
+
+  if (['問答刪除', '問答開關'].includes(interaction.commandName)) {
+    const choices = faq
+      .map(r => ({ name: `${r.id}｜${r.keywords.join('、')}`, value: r.id }))
+      .filter(c => c.name.toLowerCase().includes(focused))
+      .slice(0, 25);
+    return interaction.respond(choices).catch(() => {});
+  }
+});
+
 // ========== 機器人上線 ==========
 client.once('ready', () => {
   console.log(`已登入為 ${client.user.tag}`);
+});
+
+// ========== 監聽訊息：自動回覆 + 記錄管理員發言 ==========
+client.on('messageCreate', async message => {
+  try {
+    if (!message.guild) return;
+    if (message.author.bot) return;
+
+    // 記錄管理員最近發言（用於「管理員沒空」暫停邏輯）
+    const member = message.member;
+    if (isAdmin(member)) {
+      lastAdminActivity = Date.now();
+      return; // 管理員自己的發言不觸發自動回覆
+    }
+
+    const cfg = loadConfig();
+    if (!cfg.enabled) return;
+    if (isAutoPausedByAdmin()) return;
+
+    // 頻道限制
+    if (Array.isArray(cfg.channelIds) && cfg.channelIds.length > 0) {
+      if (!cfg.channelIds.includes(message.channelId)) return;
+    }
+
+    const faq = loadFaq();
+    const { rule, score } = findBestMatch(message.content, faq);
+    if (!rule || score < cfg.minMatchScore) return;
+
+    // 冷卻檢查
+    const key = `${message.author.id}:${rule.id}`;
+    const now = Date.now();
+    const last = cooldownMap.get(key) || 0;
+    if (now - last < cfg.cooldownSeconds * 1000) return;
+    cooldownMap.set(key, now);
+
+    // 清理過期冷卻（避免 Map 無限增長）
+    if (cooldownMap.size > 5000) {
+      for (const [k, t] of cooldownMap) {
+        if (now - t > 10 * 60 * 1000) cooldownMap.delete(k);
+      }
+    }
+
+    // 回覆
+    if (cfg.replyWithEmbed) {
+      const embed = new EmbedBuilder()
+        .setTitle('💡 自動回覆')
+        .setColor(0x5865F2)
+        .setDescription(rule.answer)
+        .setFooter({ text: `觸發關鍵字：${rule.keywords.join('、')}` });
+      await message.reply({ embeds: [embed], allowedMentions: { repliedUser: false } });
+    } else {
+      await message.reply({ content: rule.answer, allowedMentions: { repliedUser: false } });
+    }
+  } catch (err) {
+    console.error('自動回覆錯誤：', err);
+  }
 });
 
 // ========== 處理指令 ==========
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  const data = loadData();
-  const userId = interaction.user.id;
-  const today = new Date().toLocaleDateString('zh-HK'); // 使用香港日期格式
+  // ========== /問答新增 ==========
+  if (interaction.commandName === '問答新增') {
+    const keywordsRaw = interaction.options.getString('關鍵字');
+    const answer = interaction.options.getString('回答').trim();
 
-  // ========== /簽到 ==========
-  if (interaction.commandName === '簽到') {
-    if (!data[userId]) {
-      data[userId] = {
-        points: 0,
-        streak: 0,
-        lastCheckin: null,
-        totalCheckins: 0
-      };
+    const keywords = keywordsRaw
+      .split(/[,，、]/)
+      .map(k => k.trim())
+      .filter(Boolean);
+
+    if (keywords.length === 0) {
+      return interaction.reply({ content: '請至少提供一個關鍵字。', ephemeral: true });
+    }
+    if (!answer) {
+      return interaction.reply({ content: '回答內容不能為空。', ephemeral: true });
     }
 
-    const user = data[userId];
-
-    // 檢查今天是否已經簽到
-    if (user.lastCheckin === today) {
-      return interaction.reply({
-        content: '我今天跟你見過面了，明天再來看來我吧',
-        ephemeral: true
-      });
-    }
-
-    // 計算連續天數
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayStr = yesterday.toLocaleDateString('zh-HK');
-
-    if (user.lastCheckin === yesterdayStr) {
-      user.streak += 1;
-    } else {
-      user.streak = 1; // 中斷了就重新計算
-    }
-
-
-    user.lastCheckin = today;
-    user.totalCheckins += 1;
-
-    saveData(data);
+    const faq = loadFaq();
+    const id = `rule_${Date.now()}`;
+    faq.push({ id, keywords, answer, enabled: true });
+    saveFaq(faq);
 
     const embed = new EmbedBuilder()
-      .setTitle('✅ 簽到成功！')
+      .setTitle('✅ 已新增自動回覆規則')
       .setColor(0x57F287)
-      .setDescription(` ${interaction.user} 已來報到`)
       .addFields(
-        { name: '連續簽到', value: `${user.streak} 天`, inline: true },
-        { name: '累計簽到', value: `${user.totalCheckins} 次`, inline: true }
+        { name: '規則 ID', value: id, inline: false },
+        { name: '關鍵字', value: keywords.join('、'), inline: false },
+        { name: '回答', value: answer.slice(0, 1000), inline: false }
       )
-      .setTimestamp()
-      .setFooter({ text: '記得明天再來' });
+      .setTimestamp();
 
-    await interaction.reply({ embeds: [embed] });
+    return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
-  // ========== /簽到資訊 ==========
-  if (interaction.commandName === '簽到資訊') {
-    if (!data[userId]) {
+  // ========== /問答刪除 ==========
+  if (interaction.commandName === '問答刪除') {
+    const id = interaction.options.getString('編號');
+    const faq = loadFaq();
+    const idx = faq.findIndex(r => r.id === id);
+
+    if (idx === -1) {
+      return interaction.reply({ content: `找不到規則 \`${id}\`。`, ephemeral: true });
+    }
+
+    const removed = faq.splice(idx, 1)[0];
+    saveFaq(faq);
+    return interaction.reply({
+      content: `已刪除規則 \`${removed.id}\`（關鍵字：${removed.keywords.join('、')}）。`,
+      ephemeral: true
+    });
+  }
+
+  // ========== /問答列表 ==========
+  if (interaction.commandName === '問答列表') {
+    const faq = loadFaq();
+    if (faq.length === 0) {
+      return interaction.reply({ content: '目前沒有任何自動回覆規則。', ephemeral: true });
+    }
+
+    // 每 10 條分一個 Embed，避免超過長度限制
+    const chunks = [];
+    for (let i = 0; i < faq.length; i += 10) chunks.push(faq.slice(i, i + 10));
+
+    const embeds = chunks.map((chunk, ci) => {
+      const desc = chunk.map(r => {
+        const mark = r.enabled ? '🟢' : '🔴';
+        return `${mark} \`${r.id}\`｜**${r.keywords.join('、')}**\n> ${r.answer.length > 100 ? r.answer.slice(0, 100) + '…' : r.answer}`;
+      }).join('\n');
+      return new EmbedBuilder()
+        .setTitle(`📚 自動回覆規則（第 ${ci + 1} / ${chunks.length} 頁）`)
+        .setColor(0x5865F2)
+        .setDescription(desc)
+        .setFooter({ text: `共 ${faq.length} 條規則` });
+    });
+
+    return interaction.reply({ embeds, ephemeral: true });
+  }
+
+  // ========== /問答開關 ==========
+  if (interaction.commandName === '問答開關') {
+    const id = interaction.options.getString('編號');
+    const faq = loadFaq();
+    const rule = faq.find(r => r.id === id);
+
+    if (!rule) {
+      return interaction.reply({ content: `找不到規則 \`${id}\`。`, ephemeral: true });
+    }
+
+    rule.enabled = !rule.enabled;
+    saveFaq(faq);
+
+    return interaction.reply({
+      content: `規則 \`${id}\` 已${rule.enabled ? '啟用 🟢' : '停用 🔴'}。`,
+      ephemeral: true
+    });
+  }
+
+  // ========== /問答測試 ==========
+  if (interaction.commandName === '問答測試') {
+    const content = interaction.options.getString('內容');
+    const faq = loadFaq();
+    const { rule, score } = findBestMatch(content, faq);
+    const cfg = loadConfig();
+
+    if (!rule || score < cfg.minMatchScore) {
       return interaction.reply({
-        content: '你還沒有簽到紀錄，先使用 `/簽到` 簽到喔',
+        content: `這句話不會觸發任何自動回覆（最佳匹配分數：${score}，門檻：${cfg.minMatchScore}）。`,
         ephemeral: true
       });
     }
 
-    const user = data[userId];
-
     const embed = new EmbedBuilder()
-      .setTitle(`${interaction.user.username} 的簽到資訊`)
-      .setColor(0x5865F2)
+      .setTitle('🧪 匹配測試結果')
+      .setColor(0xFEE75C)
       .addFields(
-        { name: '累計簽到', value: `${user.totalCheckins} 次`, inline: true },
-        { name: '上次簽到', value: user.lastCheckin || '無', inline: true }
+        { name: '測試句子', value: content.slice(0, 1000), inline: false },
+        { name: '命中規則', value: `${rule.id}｜${rule.keywords.join('、')}`, inline: false },
+        { name: '命中分數', value: `${score}`, inline: true },
+        { name: '會回覆內容', value: rule.answer.slice(0, 1000), inline: false }
       )
-      .setThumbnail(interaction.user.displayAvatarURL())
       .setTimestamp();
 
-    await interaction.reply({ embeds: [embed], ephemeral: true });
+    return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
-  // ========== /簽到排行 ==========
-  if (interaction.commandName === '簽到排行') {
-    const sorted = Object.entries(data)
-      .sort((a, b) => b[1].streak - a[1].streak)
-      .slice(0, 10);
+  // ========== /問答設定 ==========
+  if (interaction.commandName === '問答設定') {
+    const cfg = loadConfig();
+    const enabled = interaction.options.getBoolean('啟用');
+    const cooldown = interaction.options.getInteger('冷卻秒數');
+    const pause = interaction.options.getInteger('管理員暫停分鐘');
+    const channel = interaction.options.getChannel('限定頻道');
+    const clearChannels = interaction.options.getBoolean('清除限定頻道');
+    const useEmbed = interaction.options.getBoolean('使用嵌入');
 
-    if (sorted.length === 0) {
-      return interaction.reply('目前還沒有任何簽到紀錄。');
+    const changes = [];
+
+    if (enabled !== null) { cfg.enabled = enabled; changes.push(`總開關：${enabled ? '啟用' : '停用'}`); }
+    if (cooldown !== null) { cfg.cooldownSeconds = cooldown; changes.push(`冷卻秒數：${cooldown}`); }
+    if (pause !== null) { cfg.adminPauseMinutes = pause; changes.push(`管理員暫停分鐘：${pause}`); }
+    if (useEmbed !== null) { cfg.replyWithEmbed = useEmbed; changes.push(`使用 Embed：${useEmbed ? '是' : '否'}`); }
+
+    if (clearChannels) {
+      cfg.channelIds = [];
+      changes.push('已清除限定頻道（全群生效）');
+    } else if (channel) {
+      if (!cfg.channelIds.includes(channel.id)) cfg.channelIds.push(channel.id);
+      changes.push(`新增限定頻道：<#${channel.id}>`);
     }
 
-    let description = '';
-    for (let i = 0; i < sorted.length; i++) {
-      const [id, info] = sorted[i];
-      const member = await interaction.guild.members.fetch(id).catch(() => null);
-      const name = member ? member.displayName : `未知用戶 (${id})`;
-      description += `**${i + 1}.** ${name} — 連續 **${info.streak}** 天（${info.points} 分）\n`;
+    if (changes.length === 0) {
+      return interaction.reply({ content: '沒有提供任何設定變更。', ephemeral: true });
     }
+
+    saveConfig(cfg);
+
+    return interaction.reply({
+      content: `✅ 設定已更新：\n${changes.map(c => `・${c}`).join('\n')}`,
+      ephemeral: true
+    });
+  }
+
+  // ========== /問答狀態 ==========
+  if (interaction.commandName === '問答狀態') {
+    const cfg = loadConfig();
+    const faq = loadFaq();
+    const enabledCount = faq.filter(r => r.enabled).length;
+    const paused = isAutoPausedByAdmin();
 
     const embed = new EmbedBuilder()
-      .setTitle('🏆 連續簽到排行榜')
-      .setColor(0xFEE75C)
-      .setDescription(description)
+      .setTitle('⚙️ 自動回覆系統狀態')
+      .setColor(cfg.enabled ? 0x57F287 : 0xED4245)
+      .addFields(
+        { name: '總開關', value: cfg.enabled ? '🟢 啟用' : '🔴 停用', inline: true },
+        { name: '規則數', value: `${faq.length} 條（啟用 ${enabledCount} 條）`, inline: true },
+        { name: '冷卻秒數', value: `${cfg.cooldownSeconds} 秒`, inline: true },
+        { name: '管理員暫停', value: cfg.adminPauseMinutes > 0 ? `${cfg.adminPauseMinutes} 分鐘` : '未啟用', inline: true },
+        { name: '目前是否暫停', value: paused ? '⏸️ 是（管理員剛發言）' : '▶️ 否', inline: true },
+        { name: '限定頻道', value: cfg.channelIds.length === 0 ? '全群生效' : cfg.channelIds.map(id => `<#${id}>`).join('、'), inline: false },
+        { name: '回覆格式', value: cfg.replyWithEmbed ? 'Embed' : '純文字', inline: true }
+      )
       .setTimestamp();
 
-    await interaction.reply({ embeds: [embed] });
+    return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 });
 
