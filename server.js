@@ -26,6 +26,21 @@ function credentials() {
   };
 }
 
+// 常見登入錯誤的中文提示（Discord 端設定問題）
+function errorHints(message) {
+  if (!message) return [];
+  if (/disallowed intents/i.test(message)) {
+    return ['到 Discord Developer Portal → 你的應用程式 → Bot → Privileged Gateway Intents，開啟 MESSAGE CONTENT INTENT 並按 Save Changes。'];
+  }
+  if (/Missing Access|50001/.test(message)) {
+    return ['機器人還沒有加入 GUILD_ID 指定的伺服器（或伺服器 ID 填錯）。請用 applications.commands 權限邀請機器人。'];
+  }
+  if (/invalid token|An invalid token/i.test(message)) {
+    return ['TOKEN 無效或已被 Reset，請到 Developer Portal → Bot 重新取得 Token 並更新密鑰。'];
+  }
+  return [];
+}
+
 function botSummary() {
   const creds = credentials();
   const missing = Object.keys(creds).filter(k => !creds[k]);
@@ -44,7 +59,8 @@ function botSummary() {
     error: bot.botState.error,
     tag: bot.client.user ? bot.client.user.tag : null,
     guilds: bot.client.guilds ? bot.client.guilds.cache.size : 0,
-    ping: bot.client.ws && Number.isFinite(bot.client.ws.ping) ? Math.round(bot.client.ws.ping) : null,
+    ping: bot.client.ws && bot.client.ws.ping >= 0 ? Math.round(bot.client.ws.ping) : null,
+    hints: errorHints(bot.botState.error),
   };
 }
 
@@ -72,6 +88,9 @@ const STATUS_LABELS = {
 function renderPage() {
   const s = buildStatus();
   const label = STATUS_LABELS[s.bot.status];
+  const alertInner = s.bot.hints.length
+    ? `<strong>機器人登入失敗：</strong>${esc(s.bot.error)}<ul>${s.bot.hints.map(h => `<li>${esc(h)}</li>`).join('')}</ul>`
+    : '';
   const credRows = Object.keys(credentials())
     .map(k => {
       const ok = credentials()[k];
@@ -144,6 +163,11 @@ function renderPage() {
   .cmd { color: #5865f2; font-weight: 700; margin-right: 8px; }
   .desc { color: #b5bac1; }
   .hint { margin-top: 8px; font-size: 13px; color: #faa61a; line-height: 1.6; }
+  .alert { display: none; margin-top: 12px; padding: 12px 14px; font-size: 13px; line-height: 1.7;
+           background: rgba(237,66,69,.1); border-left: 3px solid #ed4245; border-radius: 8px; color: #f2f3f5; }
+  .alert ul { margin: 8px 0 0; padding-left: 18px; list-style: disc; }
+  .alert li { border: 0; padding: 2px 0; color: #dbdee1; }
+  .alert li:first-child { padding-top: 2px; }
   footer { color: #6d6f78; font-size: 12px; text-align: center; margin-top: 8px; }
   @media (max-width: 640px) {
     body { padding: 20px 12px 40px; }
@@ -177,6 +201,7 @@ function renderPage() {
       缺少 TOKEN / CLIENT_ID / GUILD_ID，機器人還無法登入 Discord。
       補上憑證後容器會自動重啟，機器人就會上線。
     </div>
+    <div class="alert" id="bot-alert" ${s.bot.hints.length ? '' : 'style="display:none"'}>${alertInner}</div>
   </section>
 
   <section>
@@ -226,6 +251,14 @@ function renderPage() {
       document.getElementById('switch').textContent = s.config.enabled ? '啟用' : '停用';
       document.getElementById('uptime').textContent = s.uptimeSeconds;
       document.getElementById('cred-hint').style.display = s.bot.configured ? 'none' : 'block';
+      const alertBox = document.getElementById('bot-alert');
+      if (s.bot.hints && s.bot.hints.length) {
+        alertBox.style.display = 'block';
+        alertBox.innerHTML = '<strong>機器人登入失敗：</strong>' + esc(s.bot.error)
+          + '<ul>' + s.bot.hints.map(h => '<li>' + esc(h) + '</li>').join('') + '</ul>';
+      } else {
+        alertBox.style.display = 'none';
+      }
       const body = document.getElementById('rule-rows');
       body.innerHTML = s.rules.length
         ? s.rules.map(r => '<tr><td class="mono">' + esc(r.id) + '</td>'
