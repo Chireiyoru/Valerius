@@ -5,6 +5,8 @@ services:
     volumes:
       - .:/app
     env_file:
+      # 佔位預設值（可提交）＝缺少真實憑證時的後備；後面的平台密鑰檔永遠優先
+      - ./.env.base44-defaults
       - /run/base44/app.env
     environment:
       - NODE_ENV=development

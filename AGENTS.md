@@ -20,6 +20,10 @@ docker compose -f docker-compose.base44.yml logs -f bot   # 看機器人日誌
 
 缺少憑證時程式不會崩潰：狀態頁會顯示「尚未設定憑證」與缺少的變數名稱。
 
+`.env.base44-defaults`（可提交）提供 `your_token` / `your_client_id` / `your_guild_id` 佔位值，
+在 compose 的 `env_file` 中排在 `/run/base44/app.env` **之前**，因此只作為後備；
+真實憑證來自平台密鑰檔，永遠優先。不要把真實值寫進 compose 的 `environment:`，那會永久蓋掉密鑰檔。
+
 ## Discord 端前置設定（在 Developer Portal 完成，程式無法代替）
 1. Bot → Privileged Gateway Intents → 開啟 **MESSAGE CONTENT INTENT**。未開啟時登入會回
    `Used disallowed intents`（本機器人需要讀取訊息內容才能比對關鍵字）。
