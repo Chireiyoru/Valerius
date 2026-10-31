@@ -1,0 +1,5 @@
+node_modules/
+checkin-data.json
+.env
+.env.local
+npm-debug.log*

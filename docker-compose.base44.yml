@@ -1,0 +1,76 @@
+# Base44 開發環境 — Luxien 簽到機器人
+#
+# 兩個服務：
+#   bot   Discord 機器人本體（系統 這支腳本），沒有網頁介面
+#   web   唯讀狀態看板，掛在 http://localhost:3000，讓你在預覽中看到機器人狀態
+#
+# 兩者都直接掛載 repo 原始碼並以 node 執行，改完程式碼重啟服務即可生效，不需要重建映像。
+
+services:
+  bot:
+    image: node:22-alpine
+    working_dir: /app
+    command:
+      - sh
+      - -ec
+      - |
+        npm ci --no-audit --no-fund
+        if [ -z "$$TOKEN" ]; then
+          echo "[bot] 尚未設定 Discord 憑證（TOKEN / CLIENT_ID / GUILD_ID），等待憑證後自動上線。"
+          exit 0
+        fi
+        exec node 系統
+    volumes:
+      - .:/app
+      - bot-node-modules:/app/node_modules
+    env_file:
+      - /run/base44/app.env
+    environment:
+      - NODE_ENV=development
+      - BASE44_PREVIEW_MODE
+    restart: on-failure
+    labels:
+      base44.project: Luxien
+      base44.kind: worker
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "if(!process.env.TOKEN)process.exit(1);fetch('https://discord.com/api/v10/users/@me',{headers:{Authorization:'Bot '+process.env.TOKEN},signal:AbortSignal.timeout(6000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  web:
+    image: node:22-alpine
+    working_dir: /app
+    command: ["node", "dashboard/server.js"]
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+    env_file:
+      - /run/base44/app.env
+    environment:
+      - NODE_ENV=development
+      - BASE44_PREVIEW_MODE
+    restart: on-failure
+    labels:
+      base44.project: Luxien
+      base44.kind: web
+      base44.port: "3000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/status',{signal:AbortSignal.timeout(4000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  bot-node-modules:

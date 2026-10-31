@@ -1,0 +1,22 @@
+{
+  "previewPort": 3000,
+  "healthPath": "/",
+  "startCommand": "docker compose -f docker-compose.base44.yml up -d",
+  "secrets": [
+    {
+      "name": "TOKEN",
+      "description": "Discord 機器人的 Bot Token（Discord Developer Portal → Applications → Bot → Reset Token）。缺少時機器人不會上線。",
+      "requiredAtBoot": true
+    },
+    {
+      "name": "CLIENT_ID",
+      "description": "Discord Application ID（Discord Developer Portal → Applications → General Information），用來註冊斜線指令。",
+      "requiredAtBoot": true
+    },
+    {
+      "name": "GUILD_ID",
+      "description": "要用來測試指令的 Discord 伺服器 ID（對伺服器按右鍵 → 複製伺服器 ID）。",
+      "requiredAtBoot": true
+    }
+  ]
+}

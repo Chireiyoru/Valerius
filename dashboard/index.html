@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Luxien · 簽到機器人</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --panel: #171a22;
+      --panel-2: #1e222c;
+      --line: #2a2f3a;
+      --text: #e7e9ee;
+      --muted: #9aa3b2;
+      --green: #57f287;
+      --blurple: #5865f2;
+      --yellow: #fee75c;
+      --red: #ed4245;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(1200px 600px at 15% -10%, #1b2440 0%, var(--bg) 55%);
+      color: var(--text);
+      font: 15px/1.6 system-ui, -apple-system, "Segoe UI", "Noto Sans TC", sans-serif;
+      min-height: 100vh;
+      padding: 32px 20px 56px;
+    }
+    .wrap { max-width: 880px; margin: 0 auto; }
+    header { display: flex; align-items: center; gap: 14px; margin-bottom: 26px; }
+    .logo {
+      width: 46px; height: 46px; border-radius: 14px; flex: 0 0 auto;
+      background: linear-gradient(145deg, var(--blurple), #8b5cf6);
+      display: grid; place-items: center; font-size: 22px;
+      box-shadow: 0 8px 24px rgba(88, 101, 242, .35);
+    }
+    h1 { font-size: 20px; margin: 0; letter-spacing: .3px; }
+    header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    .who { display: flex; align-items: center; gap: 14px; min-width: 0; }
+    .avatar {
+      width: 52px; height: 52px; border-radius: 50%; flex: 0 0 auto;
+      background: var(--panel-2); border: 1px solid var(--line);
+      display: grid; place-items: center; font-size: 22px; overflow: hidden;
+    }
+    .avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .name { font-weight: 650; font-size: 16px; }
+    .sub { color: var(--muted); font-size: 13px; }
+
+    .badge {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 6px 12px; border-radius: 999px;
+      font-size: 13px; font-weight: 600; white-space: nowrap;
+      border: 1px solid var(--line); background: var(--panel-2); color: var(--muted);
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+    .badge.online { color: var(--green); border-color: rgba(87, 242, 135, .35); background: rgba(87, 242, 135, .08); }
+    .badge.online .dot { box-shadow: 0 0 0 4px rgba(87, 242, 135, .15); animation: pulse 2s infinite; }
+    .badge.warn { color: var(--yellow); border-color: rgba(254, 231, 92, .3); background: rgba(254, 231, 92, .07); }
+    .badge.bad { color: var(--red); border-color: rgba(237, 66, 69, .35); background: rgba(237, 66, 69, .08); }
+    @keyframes pulse { 50% { box-shadow: 0 0 0 8px rgba(87, 242, 135, 0); } }
+
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .stat { background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+    .stat b { display: block; font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .stat span { color: var(--muted); font-size: 12.5px; }
+
+    h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); margin: 26px 0 12px; font-weight: 650; }
+
+    .commands { display: grid; gap: 8px; }
+    .cmd { display: flex; gap: 14px; align-items: baseline; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13.5px; color: #c7d2fe; }
+    .cmd span { color: var(--muted); font-size: 13px; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 11px 8px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+    tbody tr:last-child td { border-bottom: 0; }
+    td.rank { width: 44px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .empty { color: var(--muted); font-size: 13.5px; padding: 10px 0; }
+    .hint { margin: 12px 0 0; color: var(--muted); font-size: 12.5px; }
+    footer { color: #6c7484; font-size: 12px; text-align: center; margin-top: 26px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo">✅</div>
+      <div>
+        <h1>Luxien · 簽到機器人</h1>
+        <p id="updated">載入中…</p>
+      </div>
+    </header>
+
+    <section class="card">
+      <div class="row">
+        <div class="who">
+          <div class="avatar" id="avatar">🤖</div>
+          <div>
+            <div class="name" id="botName">檢查中…</div>
+            <div class="sub" id="guildName">—</div>
+          </div>
+        </div>
+        <div class="badge" id="badge"><i class="dot"></i><span id="badgeText">連線中</span></div>
+      </div>
+      <p class="hint" id="notice" hidden></p>
+    </section>
+
+    <section class="card stats">
+      <div class="stat"><b id="playerCount">0</b><span>簽到成員</span></div>
+      <div class="stat"><b id="totalCheckins">0</b><span>累計簽到次數</span></div>
+      <div class="stat"><b id="topStreak">0</b><span>最高連續天數</span></div>
+    </section>
+
+    <h2>指令</h2>
+    <section class="commands" id="commands"></section>
+
+    <h2>連續簽到排行榜</h2>
+    <section class="card">
+      <table>
+        <thead>
+          <tr><th>#</th><th>成員</th><th>連續</th><th style="text-align:right">累計</th></tr>
+        </thead>
+        <tbody id="board"></tbody>
+      </table>
+      <div class="empty" id="boardEmpty">目前還沒有任何簽到紀錄。</div>
+    </section>
+
+    <footer id="foot">唯讀狀態頁 · 簽到資料由機器人寫入 checkin-data.json</footer>
+  </div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+
+    function setBadge(kind, text) {
+      const badge = $('badge');
+      badge.className = 'badge' + (kind ? ' ' + kind : '');
+      $('badgeText').textContent = text;
+    }
+
+    function timeText(iso) {
+      if (!iso) return '—';
+      return new Date(iso).toLocaleTimeString('zh-HK', { hour12: false });
+    }
+
+    function render(s) {
+      $('updated').textContent = '更新於 ' + timeText(s.checkedAt) + ' · 每 5 秒自動重新整理';
+
+      if (s.state === 'online') {
+        setBadge('online', '已上線');
+      } else if (s.state === 'missing-credentials') {
+        setBadge('warn', '等待憑證');
+      } else {
+        setBadge('bad', '未連線');
+      }
+
+      if (s.bot) {
+        $('avatar').innerHTML = s.bot.avatar
+          ? '<img alt="" src="' + s.bot.avatar + '">'
+          : '🤖';
+        $('botName').textContent = s.bot.username;
+      } else {
+        $('avatar').textContent = '🤖';
+        $('botName').textContent = '機器人尚未連線';
+      }
+      $('guildName').textContent = s.guild ? s.guild.name : (s.configured ? '伺服器資訊無法讀取' : '尚未設定伺服器');
+
+      const notice = $('notice');
+      if (s.state === 'missing-credentials') {
+        notice.hidden = false;
+        notice.textContent = '缺少 Discord 憑證：' + s.missing.join('、') + '。填入後機器人會自動上線。';
+      } else if (s.state === 'offline') {
+        notice.hidden = false;
+        notice.textContent = '無法連上 Discord（' + s.error + '），請檢查 TOKEN 是否正確。';
+      } else {
+        notice.hidden = true;
+      }
+
+      $('playerCount').textContent = s.playerCount;
+      $('totalCheckins').textContent = s.totalCheckins;
+      $('topStreak').textContent = s.leaderboard.length ? s.leaderboard[0].streak : 0;
+
+      $('commands').innerHTML = s.commands
+        .map(c => '<div class="cmd"><code>' + c.name + '</code><span>' + c.description + '</span></div>')
+        .join('');
+
+      const board = $('board');
+      if (!s.leaderboard.length) {
+        board.innerHTML = '';
+        $('boardEmpty').hidden = false;
+        return;
+      }
+      $('boardEmpty').hidden = true;
+      board.innerHTML = s.leaderboard.map((r, i) => {
+        const name = r.displayName || ('未知用戶 ' + r.id);
+        return '<tr><td class="rank">' + (i + 1) + '</td><td>' + name +
+          '</td><td>' + r.streak + ' 天</td><td class="num">' + r.totalCheckins + '</td></tr>';
+      }).join('');
+    }
+
+    async function refresh() {
+      try {
+        const res = await fetch('/api/status', { cache: 'no-store' });
+        render(await res.json());
+      } catch (err) {
+        setBadge('bad', '看板離線');
+        $('updated').textContent = '無法讀取狀態：' + err.message;
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>
