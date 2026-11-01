@@ -45,3 +45,15 @@ tries to register the slash commands at startup.
    `指令註冊完成！共 7 個。` and `已登入為 ...`.
 4. `curl -s localhost:3000/status.json` — `ready: true`, `guilds: 1`, `commandCount: 7`.
 5. In Discord, run `/問答狀態` and send any message containing a configured keyword.
+
+## Staying online (24/7 behavior)
+
+- Login failures retry every 60s **without a cap**, so enabling the intent, fixing
+  `TOKEN`, or a network blip self-heals with no restart.
+- `docker-compose.base44.yml` uses `restart: unless-stopped`, so a crashed or exited
+  bot container comes back on its own.
+- After a first successful login, a watchdog exits the process if the gateway has not
+  been ready for 2 minutes, which hands recovery to the restart policy.
+- The Base44 sandbox is a development environment: it stops when the sandbox stops.
+  Genuine 24/7 uptime requires deploying this container (or `npm start` with the same
+  env vars) to a host that runs continuously.

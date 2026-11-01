@@ -228,6 +228,7 @@ client.on('interactionCreate', async interaction => {
 
 // ========== 機器人上線 ==========
 client.once('ready', async () => {
+  lastReadyAt = Date.now();
   console.log(`已登入為 ${client.user.tag}`);
   console.log(`所在伺服器：${client.guilds.cache.size} 個`);
   if (client.guilds.cache.size === 0) {
@@ -484,24 +485,42 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// 登入失敗（例如後台還沒開啟 Message Content Intent）時每 60 秒重試，
-// 讓使用者開啟權限後機器人不需要重啟就能自動上線。
+// 登入失敗（例如後台還沒開啟 Message Content Intent、網路暫時中斷）時每 60 秒重試，
+// 不設上限：權限或網路恢復後機器人會自行上線，不需要任何人重啟。
 const LOGIN_RETRY_MS = 60 * 1000;
-const LOGIN_MAX_ATTEMPTS = 10;
 
 async function loginWithRetry(attempt = 1) {
   try {
     await client.login(process.env.TOKEN);
   } catch (error) {
-    if (attempt >= LOGIN_MAX_ATTEMPTS) {
-      lastError = `登入失敗：${error.message}（已重試 ${attempt} 次，請檢查 TOKEN 與 Discord Developer Portal 設定）`;
-      console.error('登入失敗，停止重試：', error.message);
-      return;
-    }
     lastError = `登入失敗：${error.message}（第 ${attempt} 次，60 秒後重試）`;
     console.error(`登入失敗（第 ${attempt} 次）：${error.message}，${LOGIN_RETRY_MS / 1000} 秒後重試`);
     setTimeout(() => loginWithRetry(attempt + 1), LOGIN_RETRY_MS);
   }
+}
+
+// ========== 24/7 自我修復 ==========
+// 上線後若連線中斷超過 WATCHDOG_GRACE_MS 仍無法恢復，直接結束行程，
+// 由 Docker 的 restart 策略把機器人重新啟動。
+const WATCHDOG_INTERVAL_MS = 30 * 1000;
+const WATCHDOG_GRACE_MS = 2 * 60 * 1000;
+let lastReadyAt = 0;
+
+function startWatchdog() {
+  client.on('error', err => console.error('連線錯誤：', err.message));
+  client.on('shardError', (err, id) => console.error(`分片 ${id} 錯誤：`, err.message));
+
+  setInterval(() => {
+    if (!lastReadyAt) return; // 還沒成功上線過，交給登入重試處理
+    if (client.isReady()) {
+      lastReadyAt = Date.now();
+      return;
+    }
+    if (Date.now() - lastReadyAt > WATCHDOG_GRACE_MS) {
+      console.error('連線中斷超過 2 分鐘，重新啟動行程...');
+      process.exit(1);
+    }
+  }, WATCHDOG_INTERVAL_MS);
 }
 
 // ========== 狀態頁面資料 ==========
@@ -537,6 +556,7 @@ if (require.main === module) {
   if (statusPort) startStatusServer({ port: statusPort, getStatus });
 
   // 指令會在機器人上線後（ready 事件）才註冊，需要它已經加入目標伺服器。
+  startWatchdog();
   loginWithRetry();
 }
 
