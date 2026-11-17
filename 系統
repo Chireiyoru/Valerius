@@ -554,100 +554,115 @@ client.on('interactionCreate', async interaction => {
 });
 
 // ============================================================
-// 🟢 【新增】自動提醒系統 — 資料讀寫與核心邏輯
+// 🟢 【新增】自動提醒系統 — 指令處理（放在原有指令之前）
 // ============================================================
-const REMINDER_FILE = './reminder-data.json';
-const REMINDER_STATE_FILE = './reminder-state.json';
+  // /提醒新增
+  if (interaction.commandName === '提醒新增') {
+    const name = interaction.options.getString('名稱').trim();
+    const timeStr = interaction.options.getString('截止時間').trim();
+    const mentionId = interaction.options.getString('提醒對象').trim();
+    const channel = interaction.options.getChannel('提醒頻道');
 
-function loadReminders() {
-  return loadJSON(REMINDER_FILE, []);
-}
-function saveReminders(list) {
-  saveJSON(REMINDER_FILE, list);
-}
-function loadReminderState() {
-  return loadJSON(REMINDER_STATE_FILE, {});
-}
-function saveReminderState(state) {
-  saveJSON(REMINDER_STATE_FILE, state);
-}
-
-// 🟢 【修改】解析「2026-12-01 23:59」這種格式，視為香港時間 (UTC+8)
-function parseHongKongTime(str) {
-  const m = String(str).trim().match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/);
-  if (!m) return null;
-  const [, y, mo, d, h, mi] = m.map(Number);
-  // Date.UTC 建立 UTC 時間，再減 8 小時得到「香港時間對應的 UTC 時間點」
-  const utcMs = Date.UTC(y, mo - 1, d, h, mi) - 8 * 60 * 60 * 1000;
-  return new Date(utcMs);
-}
-
-const REMINDER_CHECK_INTERVAL_MS = 60 * 60 * 1000;
-
-async function checkReminders() {
-  const reminders = loadReminders();
-  if (reminders.length === 0) return;
-
-  const state = loadReminderState();
-  const now = Date.now();
-  let stateChanged = false;
-
-  for (const r of reminders) {
-    if (!r.enabled) continue;
-
-    const deadlineMs = new Date(r.deadline).getTime();
-    if (Number.isNaN(deadlineMs)) continue;
-
-    const channel = client.channels.cache.get(r.channelId);
-    if (!channel) {
-      console.warn(`[提醒系統] 找不到頻道 ${r.channelId}（提醒：${r.name}）`);
-      continue;
+    // 🟢 【修改】改用香港時間解析
+    const deadline = parseHongKongTime(timeStr);
+    if (!deadline) {
+      return interaction.reply({
+        content: '❌ 時間格式錯誤，請用 `YYYY-MM-DD HH:mm`，例如 `2026-12-01 23:59`（香港時間）。',
+        ephemeral: true
+      });
+    }
+    if (deadline.getTime() <= Date.now()) {
+      return interaction.reply({ content: '❌ 截止時間必須是未來時間。', ephemeral: true });
+    }
+    if (!/^\d{15,25}$/.test(mentionId)) {
+      return interaction.reply({
+        content: '❌ 提醒對象請填角色或使用者的 **數字 ID**（例如 `123456789012345678`）。',
+        ephemeral: true
+      });
     }
 
-    // 🟢 【修改】顯示時統一用香港時區
-    const deadlineText = new Date(deadlineMs).toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' });
+    const reminders = loadReminders();
+    const id = `rem_${Date.now()}`;
+    reminders.push({
+      id,
+      name,
+      deadline: deadline.toISOString(),
+      mentionId,
+      channelId: channel.id,
+      enabled: true
+    });
+    saveReminders(reminders);
 
-    // 條件一：還剩 7 天
-    const sevenDayMs = deadlineMs - 7 * 24 * 60 * 60 * 1000;
-    const diff7 = now - sevenDayMs;
-    if (diff7 > -REMINDER_CHECK_INTERVAL_MS && diff7 < REMINDER_CHECK_INTERVAL_MS) {
-      const key7 = `${r.id}_7d`;
-      if (!state[key7]) {
-        await channel.send({
-          content: `⏰ **提醒**：<@${r.mentionId}> 表單 **${r.name}** 距離截止還有 **7 天**！\n截止時間：${deadlineText}（香港時間）`
-        }).catch(err => console.error('[提醒系統] 發送 7 天提醒失敗：', err));
-        state[key7] = now;
-        stateChanged = true;
-      }
-    }
+    const embed = new EmbedBuilder()
+      .setTitle('✅ 已新增填單提醒')
+      .setColor(0x57F287)
+      .addFields(
+        { name: '提醒 ID', value: id, inline: false },
+        { name: '表單名稱', value: name, inline: false },
+        // 🟢 【修改】顯示香港時間
+        { name: '截止時間', value: deadline.toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' }) + '（香港時間）', inline: false },
+        { name: '提醒對象', value: `<@${mentionId}>`, inline: false },
+        { name: '提醒頻道', value: `<#${channel.id}>`, inline: false }
+      )
+      .setTimestamp();
 
-    // 條件二：時限已到
-    if (now >= deadlineMs) {
-      const keyExp = `${r.id}_expired`;
-      if (!state[keyExp]) {
-        await channel.send({
-          content: `🚨 **時限已到**：<@${r.mentionId}> 表單 **${r.name}** 的填寫期限已經結束！\n截止時間：${deadlineText}（香港時間）`
-        }).catch(err => console.error('[提醒系統] 發送到期提醒失敗：', err));
-        state[keyExp] = now;
-        stateChanged = true;
-      }
-    }
+    return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
-  if (stateChanged) saveReminderState(state);
-}
+  // /提醒刪除（不涉時間，維持原樣）
+  if (interaction.commandName === '提醒刪除') {
+    const id = interaction.options.getString('編號');
+    const reminders = loadReminders();
+    const idx = reminders.findIndex(r => r.id === id);
+    if (idx === -1) {
+      return interaction.reply({ content: `找不到提醒 \`${id}\`。`, ephemeral: true });
+    }
+    const removed = reminders.splice(idx, 1)[0];
+    saveReminders(reminders);
 
-let reminderTimer = null;
-function startReminderLoop() {
-  if (reminderTimer) return;
-  setTimeout(() => {
-    checkReminders().catch(err => console.error('[提醒系統] 首次檢查錯誤：', err));
-    reminderTimer = setInterval(() => {
-      checkReminders().catch(err => console.error('[提醒系統] 定時檢查錯誤：', err));
-    }, REMINDER_CHECK_INTERVAL_MS);
-  }, 30 * 1000);
-}
-// 🟢 【新增】自動提醒系統 — 核心邏輯結束
+    const state = loadReminderState();
+    delete state[`${id}_7d`];
+    delete state[`${id}_expired`];
+    saveReminderState(state);
+
+    return interaction.reply({
+      content: `已刪除提醒 \`${removed.id}\`（${removed.name}）。`,
+      ephemeral: true
+    });
+  }
+
+  // /提醒列表
+  if (interaction.commandName === '提醒列表') {
+    const reminders = loadReminders();
+    if (reminders.length === 0) {
+      return interaction.reply({ content: '目前沒有任何填單提醒。', ephemeral: true });
+    }
+
+    const embeds = reminders.map((r, i) => {
+      const deadline = new Date(r.deadline);
+      const remainingMs = deadline.getTime() - Date.now();
+      let status;
+      if (remainingMs <= 0) status = '🚨 已到期';
+      else if (remainingMs <= 7 * 24 * 60 * 60 * 1000) status = '⏰ 剩不到 7 天';
+      else status = '✅ 進行中';
+
+      return new EmbedBuilder()
+        .setTitle(`📋 提醒 ${i + 1} / ${reminders.length}`)
+        .setColor(remainingMs <= 0 ? 0xED4245 : (remainingMs <= 7 * 86400000 ? 0xFEE75C : 0x57F287))
+        .addFields(
+          { name: '提醒 ID', value: r.id, inline: false },
+          { name: '表單名稱', value: r.name, inline: false },
+          // 🟢 【修改】顯示香港時間
+          { name: '截止時間', value: deadline.toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' }) + '（香港時間）', inline: false },
+          { name: '狀態', value: status, inline: true },
+          { name: '提醒對象', value: `<@${r.mentionId}>`, inline: true },
+          { name: '提醒頻道', value: `<#${r.channelId}>`, inline: true }
+        );
+    });
+
+    return interaction.reply({ embeds: embeds.slice(0, 10), ephemeral: true });
+  }
+// 🟢 【新增】提醒指令處理結束
 // ============================================================
 
 client.login(process.env.TOKEN);
