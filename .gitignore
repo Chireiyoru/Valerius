@@ -1,0 +1,8 @@
+node_modules/
+faq-data.json
+faq-config.json
+reminder-data.json
+reminder-state.json
+.env
+.env.local
+data/

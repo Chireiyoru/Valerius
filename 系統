@@ -10,6 +10,8 @@ const {
   ChannelType
 } = require('discord.js');
 const fs = require('fs');
+const startStatusServer = require('./status-server');
+const reminderLib = require('./reminder');
 
 const client = new Client({
   intents: [
@@ -20,8 +22,11 @@ const client = new Client({
 });
 
 // ========== 設定 ==========
-const FAQ_FILE = './faq-data.json';
-const CONFIG_FILE = './faq-config.json';
+// 資料檔路徑可用環境變數覆寫（例如容器內掛載的資料目錄）
+const FAQ_FILE = process.env.FAQ_FILE || './faq-data.json';
+const CONFIG_FILE = process.env.CONFIG_FILE || './faq-config.json';
+const REMINDER_FILE = process.env.REMINDER_FILE || './reminder-data.json';
+const REMINDER_STATE_FILE = process.env.REMINDER_STATE_FILE || './reminder-state.json';
 
 // 預設設定
 const DEFAULT_CONFIG = {
@@ -124,102 +129,59 @@ function findBestMatch(content, faq) {
   return { rule: best, score: bestScore };
 }
 
-// ============================================================
-// 🟢 【新增】自動提醒系統 — 資料讀寫與核心邏輯
-// ============================================================
-const REMINDER_FILE = './reminder-data.json';
-const REMINDER_STATE_FILE = './reminder-state.json';
-
+// ========== 自動提醒系統 ==========
+// 資料格式與判斷邏輯在 reminder.js，這裡只負責實際發送訊息。
 function loadReminders() {
-  return loadJSON(REMINDER_FILE, []);
+  return reminderLib.loadReminders(REMINDER_FILE);
 }
 function saveReminders(list) {
-  saveJSON(REMINDER_FILE, list);
+  reminderLib.saveReminders(REMINDER_FILE, list);
 }
-function loadReminderState() {
-  return loadJSON(REMINDER_STATE_FILE, {});
-}
-function saveReminderState(state) {
-  saveJSON(REMINDER_STATE_FILE, state);
-}
-
-// 🟢 【修改】解析「2026-12-01 23:59」這種格式，視為香港時間 (UTC+8)
-function parseHongKongTime(str) {
-  const m = String(str).trim().match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/);
-  if (!m) return null;
-  const [, y, mo, d, h, mi] = m.map(Number);
-  // Date.UTC 建立 UTC 時間，再減 8 小時得到「香港時間對應的 UTC 時間點」
-  const utcMs = Date.UTC(y, mo - 1, d, h, mi) - 8 * 60 * 60 * 1000;
-  return new Date(utcMs);
-}
-
-const REMINDER_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 async function checkReminders() {
-  const reminders = loadReminders();
-  if (reminders.length === 0) return;
+  const list = loadReminders();
+  if (list.length === 0) return;
 
-  const state = loadReminderState();
-  const now = Date.now();
-  let stateChanged = false;
-
-  for (const r of reminders) {
-    if (!r.enabled) continue;
-
-    const deadlineMs = new Date(r.deadline).getTime();
-    if (Number.isNaN(deadlineMs)) continue;
-
-    const channel = client.channels.cache.get(r.channelId);
-    if (!channel) {
-      console.warn(`[提醒系統] 找不到頻道 ${r.channelId}（提醒：${r.name}）`);
-      continue;
-    }
-
-    // 🟢 【修改】顯示時統一用香港時區
-    const deadlineText = new Date(deadlineMs).toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' });
-
-    // 條件一：還剩 7 天
-    const sevenDayMs = deadlineMs - 7 * 24 * 60 * 60 * 1000;
-    const diff7 = now - sevenDayMs;
-    if (diff7 > -REMINDER_CHECK_INTERVAL_MS && diff7 < REMINDER_CHECK_INTERVAL_MS) {
-      const key7 = `${r.id}_7d`;
-      if (!state[key7]) {
+  const state = reminderLib.loadState(REMINDER_STATE_FILE);
+  const stateChanged = await reminderLib.deliverDue({
+    reminders: list,
+    state,
+    now: Date.now(),
+    send: async item => {
+      const { reminder } = item;
+      const channel = client.channels.cache.get(reminder.channelId);
+      if (!channel) {
+        console.warn(`[提醒系統] 找不到頻道 ${reminder.channelId}（提醒：${reminder.name}）`);
+        return false;
+      }
+      try {
         await channel.send({
-          content: `⏰ **提醒**：<@${r.mentionId}> 表單 **${r.name}** 距離截止還有 **7 天**！\n截止時間：${deadlineText}（香港時間）`
-        }).catch(err => console.error('[提醒系統] 發送 7 天提醒失敗：', err));
-        state[key7] = now;
-        stateChanged = true;
+          content: reminderLib.buildMessage(item),
+          allowedMentions: { users: reminder.mentionId ? [reminder.mentionId] : [] }
+        });
+        console.log(`[提醒系統] 已發送${item.kind === 'expired' ? '到期' : ' 7 天'}提醒：${reminder.name}`);
+        return true;
+      } catch (err) {
+        console.error('[提醒系統] 發送提醒失敗：', err);
+        return false;
       }
     }
+  });
 
-    // 條件二：時限已到
-    if (now >= deadlineMs) {
-      const keyExp = `${r.id}_expired`;
-      if (!state[keyExp]) {
-        await channel.send({
-          content: `🚨 **時限已到**：<@${r.mentionId}> 表單 **${r.name}** 的填寫期限已經結束！\n截止時間：${deadlineText}（香港時間）`
-        }).catch(err => console.error('[提醒系統] 發送到期提醒失敗：', err));
-        state[keyExp] = now;
-        stateChanged = true;
-      }
-    }
-  }
-
-  if (stateChanged) saveReminderState(state);
+  if (stateChanged) reminderLib.saveState(REMINDER_STATE_FILE, state);
 }
 
 let reminderTimer = null;
 function startReminderLoop() {
   if (reminderTimer) return;
-  setTimeout(() => {
+  reminderTimer = setTimeout(() => {
     checkReminders().catch(err => console.error('[提醒系統] 首次檢查錯誤：', err));
     reminderTimer = setInterval(() => {
       checkReminders().catch(err => console.error('[提醒系統] 定時檢查錯誤：', err));
-    }, REMINDER_CHECK_INTERVAL_MS);
+    }, reminderLib.CHECK_INTERVAL_MS);
   }, 30 * 1000);
+  console.log('自動提醒系統已啟動（每小時檢查一次）。');
 }
-// 🟢 【新增】自動提醒系統 — 核心邏輯結束
-// ============================================================
 
 // ========== 註冊指令 ==========
 const commands = [
@@ -268,22 +230,63 @@ const commands = [
     .setName('問答狀態')
     .setDescription('【管理員】查看自動回覆系統目前狀態')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('提醒新增')
+    .setDescription('【管理員】新增一個表單截止提醒')
+    .addStringOption(o => o.setName('表單名稱').setDescription('要提醒的表單名稱').setRequired(true).setMaxLength(100))
+    .addStringOption(o => o.setName('截止時間').setDescription('香港時間，格式：2026-12-01 23:59').setRequired(true))
+    .addUserOption(o => o.setName('標註對象').setDescription('提醒時要標註的人（留空=不標註）').setRequired(false))
+    .addChannelOption(o => o.setName('頻道').setDescription('提醒發到哪個頻道（留空=目前頻道）').setRequired(false).addChannelTypes(ChannelType.GuildText))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('提醒列表')
+    .setDescription('【管理員】查看所有截止提醒')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  new SlashCommandBuilder()
+    .setName('提醒刪除')
+    .setDescription('【管理員】刪除一個截止提醒')
+    .addStringOption(o => o.setName('編號').setDescription('提醒 ID').setRequired(true).setAutocomplete(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 ].map(cmd => cmd.toJSON());
 
-const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+const rest = new REST({ version: '10' });
+if (process.env.TOKEN) rest.setToken(process.env.TOKEN);
 
-(async () => {
+// ========== 執行時狀態（供狀態頁面顯示）==========
+const startedAt = Date.now();
+let lastError = null;        // 最近一次錯誤（登入或註冊）
+let commandError = null;     // 指令註冊錯誤
+let registeredCommands = []; // 已註冊成功的指令
+
+// 剛被邀請加入伺服器時，Discord 有時會暫時回傳 Missing Access，
+// 因此註冊失敗會自動重試。
+const COMMAND_RETRY_MS = 15 * 1000;
+const COMMAND_MAX_ATTEMPTS = 5;
+
+async function registerCommands(attempt = 1) {
   try {
     console.log('正在註冊指令...');
-    await rest.put(
+    registeredCommands = await rest.put(
       Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
       { body: commands }
     );
-    console.log('指令註冊完成！');
+    commandError = null;
+    if (lastError && lastError.includes('指令註冊失敗')) lastError = null;
+    console.log(`指令註冊完成！共 ${registeredCommands.length} 個。`);
   } catch (error) {
-    console.error(error);
+    commandError = `${error.message}${error.code ? `（code ${error.code}）` : ''}`;
+    lastError = `指令註冊失敗：${commandError}`;
+    if (attempt >= COMMAND_MAX_ATTEMPTS) {
+      console.error('指令註冊失敗，停止重試：', commandError);
+      return;
+    }
+    console.error(`指令註冊失敗（第 ${attempt} 次）：${commandError}，${COMMAND_RETRY_MS / 1000} 秒後重試`);
+    setTimeout(() => registerCommands(attempt + 1), COMMAND_RETRY_MS);
   }
-})();
+}
 
 // ========== 自動完成 ==========
 client.on('interactionCreate', async interaction => {
@@ -298,11 +301,26 @@ client.on('interactionCreate', async interaction => {
       .slice(0, 25);
     return interaction.respond(choices).catch(() => {});
   }
+
+  if (interaction.commandName === '提醒刪除') {
+    const choices = loadReminders()
+      .map(r => ({ name: `${r.name}｜${reminderLib.formatDeadline(reminderLib.parseDeadline(r.deadline))}`, value: r.id }))
+      .filter(c => c.name.toLowerCase().includes(focused))
+      .slice(0, 25);
+    return interaction.respond(choices).catch(() => {});
+  }
 });
 
 // ========== 機器人上線 ==========
-client.once('ready', () => {
+client.once('ready', async () => {
+  lastReadyAt = Date.now();
   console.log(`已登入為 ${client.user.tag}`);
+  console.log(`所在伺服器：${client.guilds.cache.size} 個`);
+  if (client.guilds.cache.size === 0) {
+    console.warn('機器人尚未加入任何伺服器，邀請它加入後才會收到訊息。');
+  }
+  startReminderLoop();
+  await registerCommands();
 });
 
 // ========== 監聽訊息：自動回覆 + 記錄管理員發言 ==========
@@ -551,103 +569,216 @@ client.on('interactionCreate', async interaction => {
 
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
-});
 
-// ============================================================
-// 🟢 【新增】自動提醒系統 — 資料讀寫與核心邏輯
-// ============================================================
-const REMINDER_FILE = './reminder-data.json';
-const REMINDER_STATE_FILE = './reminder-state.json';
+  // ========== /提醒新增 ==========
+  if (interaction.commandName === '提醒新增') {
+    const name = interaction.options.getString('表單名稱').trim();
+    const deadlineRaw = interaction.options.getString('截止時間');
+    const user = interaction.options.getUser('標註對象');
+    const channel = interaction.options.getChannel('頻道') || interaction.channel;
 
-function loadReminders() {
-  return loadJSON(REMINDER_FILE, []);
-}
-function saveReminders(list) {
-  saveJSON(REMINDER_FILE, list);
-}
-function loadReminderState() {
-  return loadJSON(REMINDER_STATE_FILE, {});
-}
-function saveReminderState(state) {
-  saveJSON(REMINDER_STATE_FILE, state);
-}
-
-// 🟢 【修改】解析「2026-12-01 23:59」這種格式，視為香港時間 (UTC+8)
-function parseHongKongTime(str) {
-  const m = String(str).trim().match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})$/);
-  if (!m) return null;
-  const [, y, mo, d, h, mi] = m.map(Number);
-  // Date.UTC 建立 UTC 時間，再減 8 小時得到「香港時間對應的 UTC 時間點」
-  const utcMs = Date.UTC(y, mo - 1, d, h, mi) - 8 * 60 * 60 * 1000;
-  return new Date(utcMs);
-}
-
-const REMINDER_CHECK_INTERVAL_MS = 60 * 60 * 1000;
-
-async function checkReminders() {
-  const reminders = loadReminders();
-  if (reminders.length === 0) return;
-
-  const state = loadReminderState();
-  const now = Date.now();
-  let stateChanged = false;
-
-  for (const r of reminders) {
-    if (!r.enabled) continue;
-
-    const deadlineMs = new Date(r.deadline).getTime();
-    if (Number.isNaN(deadlineMs)) continue;
-
-    const channel = client.channels.cache.get(r.channelId);
-    if (!channel) {
-      console.warn(`[提醒系統] 找不到頻道 ${r.channelId}（提醒：${r.name}）`);
-      continue;
+    const deadline = reminderLib.parseHongKongTime(deadlineRaw);
+    if (!deadline) {
+      return interaction.reply({
+        content: `截止時間格式不正確：\`${deadlineRaw}\`\n請使用 \`2026-12-01 23:59\` 這種格式（香港時間）。`,
+        ephemeral: true
+      });
+    }
+    if (!channel || typeof channel.send !== 'function') {
+      return interaction.reply({ content: '找不到可以發送提醒的頻道。', ephemeral: true });
     }
 
-    // 🟢 【修改】顯示時統一用香港時區
-    const deadlineText = new Date(deadlineMs).toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' });
+    const list = loadReminders();
+    const reminder = {
+      id: `reminder_${Date.now()}`,
+      name,
+      deadline: deadline.toISOString(),
+      channelId: channel.id,
+      mentionId: user ? user.id : null,
+      enabled: true,
+      createdBy: interaction.user.id,
+      createdAt: new Date().toISOString()
+    };
+    list.push(reminder);
+    saveReminders(list);
 
-    // 條件一：還剩 7 天
-    const sevenDayMs = deadlineMs - 7 * 24 * 60 * 60 * 1000;
-    const diff7 = now - sevenDayMs;
-    if (diff7 > -REMINDER_CHECK_INTERVAL_MS && diff7 < REMINDER_CHECK_INTERVAL_MS) {
-      const key7 = `${r.id}_7d`;
-      if (!state[key7]) {
-        await channel.send({
-          content: `⏰ **提醒**：<@${r.mentionId}> 表單 **${r.name}** 距離截止還有 **7 天**！\n截止時間：${deadlineText}（香港時間）`
-        }).catch(err => console.error('[提醒系統] 發送 7 天提醒失敗：', err));
-        state[key7] = now;
-        stateChanged = true;
-      }
-    }
+    const embed = new EmbedBuilder()
+      .setTitle('✅ 已新增截止提醒')
+      .setColor(0x57F287)
+      .addFields(
+        { name: '提醒 ID', value: reminder.id, inline: false },
+        { name: '表單', value: name, inline: false },
+        { name: '截止時間', value: `${reminderLib.formatDeadline(deadline.getTime())}（香港時間）`, inline: false },
+        { name: '提醒頻道', value: `<#${channel.id}>`, inline: true },
+        { name: '標註對象', value: user ? `<@${user.id}>` : '不標註', inline: true },
+        { name: '提醒時間', value: '截止前 7 天 及 截止當下各提醒一次', inline: false }
+      )
+      .setTimestamp();
 
-    // 條件二：時限已到
-    if (now >= deadlineMs) {
-      const keyExp = `${r.id}_expired`;
-      if (!state[keyExp]) {
-        await channel.send({
-          content: `🚨 **時限已到**：<@${r.mentionId}> 表單 **${r.name}** 的填寫期限已經結束！\n截止時間：${deadlineText}（香港時間）`
-        }).catch(err => console.error('[提醒系統] 發送到期提醒失敗：', err));
-        state[keyExp] = now;
-        stateChanged = true;
-      }
-    }
+    return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
-  if (stateChanged) saveReminderState(state);
+  // ========== /提醒列表 ==========
+  if (interaction.commandName === '提醒列表') {
+    const list = loadReminders();
+    if (list.length === 0) {
+      return interaction.reply({ content: '目前沒有任何截止提醒。', ephemeral: true });
+    }
+
+    const state = reminderLib.loadState(REMINDER_STATE_FILE);
+    const now = Date.now();
+    const sorted = [...list].sort((a, b) => (reminderLib.parseDeadline(a.deadline) || 0) - (reminderLib.parseDeadline(b.deadline) || 0));
+    const chunks = [];
+    for (let i = 0; i < sorted.length; i += 10) chunks.push(sorted.slice(i, i + 10));
+
+    const embeds = chunks.map((chunk, ci) => {
+      const desc = chunk.map(r => {
+        const deadlineMs = reminderLib.parseDeadline(r.deadline);
+        if (deadlineMs === null) return `🔴 \`${r.id}\`｜**${r.name}**\n> 截止時間格式無效`;
+        const mark = !r.enabled ? '🔴' : deadlineMs <= now ? '🚨' : '🟢';
+        const mention = r.mentionId ? ` <@${r.mentionId}>` : '';
+        return `${mark} \`${r.id}\`｜**${r.name}**${mention}\n> 截止：${reminderLib.formatDeadline(deadlineMs)}｜頻道：<#${r.channelId}>`;
+      }).join('\n');
+      return new EmbedBuilder()
+        .setTitle(`⏰ 截止提醒（第 ${ci + 1} / ${chunks.length} 頁）`)
+        .setColor(0x5865F2)
+        .setDescription(desc)
+        .setFooter({ text: `共 ${list.length} 個提醒` });
+    });
+
+    return interaction.reply({ embeds, ephemeral: true });
+  }
+
+  // ========== /提醒刪除 ==========
+  if (interaction.commandName === '提醒刪除') {
+    const id = interaction.options.getString('編號');
+    const list = loadReminders();
+    const idx = list.findIndex(r => r.id === id);
+
+    if (idx === -1) {
+      return interaction.reply({ content: `找不到提醒 \`${id}\`。`, ephemeral: true });
+    }
+
+    const removed = list.splice(idx, 1)[0];
+    saveReminders(list);
+
+    const state = reminderLib.loadState(REMINDER_STATE_FILE);
+    delete state[`${removed.id}_7d`];
+    delete state[`${removed.id}_expired`];
+    reminderLib.saveState(REMINDER_STATE_FILE, state);
+
+    return interaction.reply({ content: `已刪除提醒 \`${removed.id}\`（${removed.name}）。`, ephemeral: true });
+  }
+});
+
+// 登入失敗（例如後台還沒開啟 Message Content Intent、網路暫時中斷）時每 60 秒重試，
+// 不設上限：權限或網路恢復後機器人會自行上線，不需要任何人重啟。
+const LOGIN_RETRY_MS = 60 * 1000;
+
+async function loginWithRetry(attempt = 1) {
+  try {
+    await client.login(process.env.TOKEN);
+  } catch (error) {
+    lastError = `登入失敗：${error.message}（第 ${attempt} 次，60 秒後重試）`;
+    console.error(`登入失敗（第 ${attempt} 次）：${error.message}，${LOGIN_RETRY_MS / 1000} 秒後重試`);
+    setTimeout(() => loginWithRetry(attempt + 1), LOGIN_RETRY_MS);
+  }
 }
 
-let reminderTimer = null;
-function startReminderLoop() {
-  if (reminderTimer) return;
-  setTimeout(() => {
-    checkReminders().catch(err => console.error('[提醒系統] 首次檢查錯誤：', err));
-    reminderTimer = setInterval(() => {
-      checkReminders().catch(err => console.error('[提醒系統] 定時檢查錯誤：', err));
-    }, REMINDER_CHECK_INTERVAL_MS);
-  }, 30 * 1000);
-}
-// 🟢 【新增】自動提醒系統 — 核心邏輯結束
-// ============================================================
+// ========== 24/7 自我修復 ==========
+// 上線後若連線中斷超過 WATCHDOG_GRACE_MS 仍無法恢復，直接結束行程，
+// 由 Docker 的 restart 策略把機器人重新啟動。
+const WATCHDOG_INTERVAL_MS = 30 * 1000;
+const WATCHDOG_GRACE_MS = 2 * 60 * 1000;
+let lastReadyAt = 0;
 
-client.login(process.env.TOKEN);
+function startWatchdog() {
+  client.on('error', err => console.error('連線錯誤：', err.message));
+  client.on('shardError', (err, id) => console.error(`分片 ${id} 錯誤：`, err.message));
+
+  setInterval(() => {
+    if (!lastReadyAt) return; // 還沒成功上線過，交給登入重試處理
+    if (client.isReady()) {
+      lastReadyAt = Date.now();
+      return;
+    }
+    if (Date.now() - lastReadyAt > WATCHDOG_GRACE_MS) {
+      console.error('連線中斷超過 2 分鐘，重新啟動行程...');
+      process.exit(1);
+    }
+  }, WATCHDOG_INTERVAL_MS);
+}
+
+// ========== 狀態頁面資料 ==========
+function getStatus() {
+  let faq = [];
+  let cfg = DEFAULT_CONFIG;
+  let reminders = [];
+  try { faq = loadFaq(); } catch { /* 讀取失敗時顯示空題庫 */ }
+  try { cfg = loadConfig(); } catch { /* 讀取失敗時顯示預設設定 */ }
+  try { reminders = loadReminders(); } catch { /* 讀取失敗時顯示無提醒 */ }
+
+  const now = Date.now();
+  const upcoming = reminders.filter(r => {
+    const ms = reminderLib.parseDeadline(r.deadline);
+    return r.enabled && ms !== null && ms > now;
+  });
+  const nextReminder = upcoming
+    .map(r => ({ name: r.name, deadlineMs: reminderLib.parseDeadline(r.deadline) }))
+    .sort((a, b) => a.deadlineMs - b.deadlineMs)[0];
+
+  const seconds = Math.floor((Date.now() - startedAt) / 1000);
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+
+  return {
+    ready: client.isReady(),
+    botTag: client.user ? client.user.tag : null,
+    clientId: process.env.CLIENT_ID || null,
+    guilds: client.guilds.cache.size,
+    configuredGuildId: process.env.GUILD_ID || null,
+    commandCount: registeredCommands.length,
+    commandError,
+    lastError,
+    faqCount: faq.length,
+    enabledRules: faq.filter(r => r.enabled).length,
+    reminderCount: reminders.length,
+    reminderEnabled: reminders.filter(r => r.enabled).length,
+    reminderOverdue: reminders.filter(r => {
+      const ms = reminderLib.parseDeadline(r.deadline);
+      return r.enabled && ms !== null && ms <= now;
+    }).length,
+    nextReminder: nextReminder
+      ? { name: nextReminder.name, deadline: reminderLib.formatDeadline(nextReminder.deadlineMs) }
+      : null,
+    reminderLoopRunning: Boolean(reminderTimer),
+    config: cfg,
+    uptime: h > 0 ? `${h} 小時 ${m} 分` : `${m} 分 ${seconds % 60} 秒`
+  };
+}
+
+// ========== 啟動 ==========
+if (require.main === module) {
+  const statusPort = Number(process.env.STATUS_PORT || 0);
+  if (statusPort) startStatusServer({ port: statusPort, getStatus });
+
+  // 指令會在機器人上線後（ready 事件）才註冊，需要它已經加入目標伺服器。
+  startWatchdog();
+  loginWithRetry();
+}
+
+module.exports = {
+  DEFAULT_CONFIG,
+  commands,
+  normalize,
+  matchScore,
+  findBestMatch,
+  loadFaq,
+  saveFaq,
+  loadConfig,
+  saveConfig,
+  loadReminders,
+  saveReminders,
+  checkReminders,
+  getStatus
+};
