@@ -42,8 +42,8 @@ tries to register the slash commands at startup.
 1. `npm test` — matching/config logic (10 assertions).
 2. `docker compose -f docker-compose.base44.yml ps` — bot service must be `healthy`.
 3. `docker compose -f docker-compose.base44.yml logs bot` — expect
-   `指令註冊完成！共 7 個。` and `已登入為 ...`.
-4. `curl -s localhost:3000/status.json` — `ready: true`, `guilds: 1`, `commandCount: 7`.
+   `指令註冊完成！共 10 個。` and `已登入為 ...`.
+4. `curl -s localhost:3000/status.json` — `ready: true`, `guilds: 1`, `commandCount: 10`.
 5. In Discord, run `/問答狀態` and send any message containing a configured keyword.
 
 ## Staying online (24/7 behavior)
